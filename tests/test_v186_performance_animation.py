@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Guard for the lag and static-boss regression reported from V1.8.5.
 src = Path('tools/integrate_project.py').read_text(encoding='utf-8')
 
 assert 'AnimatedSprite2D' in src, 'Bosses ainda usam Sprite2D estatico.'

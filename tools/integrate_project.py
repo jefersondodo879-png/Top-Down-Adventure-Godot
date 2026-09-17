@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import struct
 import zipfile
 from pathlib import Path
 
@@ -11,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INPUT = ROOT / "input"
 WORK = ROOT / "build_work"
 DIST = ROOT / "dist"
-OUT_NAME = "Top_Down_Adventure_V1_8_5_BOSSES_ORGANIZADOS.zip"
+OUT_NAME = "Top_Down_Adventure_V1_8_6_PERFORMANCE_ANIMATIONS.zip"
 
 BASE_ZIP = INPUT / "Top_Down_Adventure_V1_8_3.zip"
 ICONS_ZIP = INPUT / "496_RPG_icons.zip"
@@ -56,19 +55,6 @@ def res_path(project: Path, p: Path) -> str:
     return "res://" + p.relative_to(project).as_posix()
 
 
-def pick_png(folder: Path, preferred: list[str]) -> Path:
-    pngs = sorted(folder.rglob("*.png"))
-    if not pngs:
-        raise RuntimeError(f"No PNG found in {folder}")
-    lowers = [(p, p.name.lower()) for p in pngs]
-    for token in preferred:
-        token = token.lower()
-        for p, name in lowers:
-            if token in name:
-                return p
-    return pngs[0]
-
-
 def ensure_autoload(project: Path, name: str, script_res: str) -> None:
     pg = project / "project.godot"
     text = pg.read_text(encoding="utf-8")
@@ -82,31 +68,54 @@ def ensure_autoload(project: Path, name: str, script_res: str) -> None:
     pg.write_text(text, encoding="utf-8")
 
 
-def png_dimensions(path: Path) -> tuple[int, int]:
-    with path.open("rb") as f:
-        sig = f.read(24)
-    if len(sig) < 24 or sig[:8] != b"\x89PNG\r\n\x1a\n":
-        return (64, 64)
-    return struct.unpack(">II", sig[16:24])
+def natural_key(path: Path) -> list[object]:
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
 
 
-def frame_rect_for_texture(path: Path) -> tuple[int, int]:
-    width, height = png_dimensions(path)
-    if width >= height * 2:
-        # Horizontal sprite strip/sheet: use the first square-ish frame.
-        return (min(height, width), height)
-    if height >= width * 2:
-        # Vertical sprite strip/sheet.
-        return (width, min(width, height))
-    return (width, height)
+def _animation_pngs(root: Path, folder_name: str) -> list[Path]:
+    matches = [p for p in root.rglob("*.png") if p.parent.name.lower() == folder_name.lower()]
+    matches.sort(key=natural_key)
+    return matches
 
 
-def display_scale(path: Path, target_height: float) -> float:
-    _, frame_h = frame_rect_for_texture(path)
-    if frame_h <= 0:
-        return 1.0
-    value = target_height / float(frame_h)
-    return max(0.18, min(1.15, value))
+def write_minotaur_spriteframes(project: Path, mino_dir: Path) -> Path:
+    animations = {
+        "idle": (_animation_pngs(mino_dir, "idle"), 8.0, True),
+        "walk": (_animation_pngs(mino_dir, "walk"), 10.0, True),
+        "attack": (_animation_pngs(mino_dir, "atk_1"), 12.0, False),
+    }
+    for name, (frames, _, _) in animations.items():
+        if not frames:
+            raise RuntimeError(f"Minotaur animation frames not found: {name}")
+
+    resources: list[tuple[str, Path]] = []
+    animation_entries: list[str] = []
+    resource_index = 1
+
+    for anim_name, (frames, speed, loop) in animations.items():
+        frame_entries: list[str] = []
+        for frame in frames:
+            ext_id = f"{resource_index}_{anim_name}_{frame.stem}"
+            resources.append((ext_id, frame))
+            frame_entries.append(
+                '{\n"duration": 1.0,\n"texture": ExtResource("%s")\n}' % ext_id
+            )
+            resource_index += 1
+        animation_entries.append(
+            '{\n"frames": [%s],\n"loop": %s,\n"name": &"%s",\n"speed": %.1f\n}'
+            % (",\n".join(frame_entries), str(loop).lower(), anim_name, speed)
+        )
+
+    out = project / "resources" / "animations" / "minotaur_integrated_frames.tres"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f'[gd_resource type="SpriteFrames" load_steps={len(resources) + 1} format=3]', ""]
+    for ext_id, frame in resources:
+        lines.append(
+            f'[ext_resource type="Texture2D" path="{res_path(project, frame)}" id="{ext_id}"]'
+        )
+    lines += ["", "[resource]", "animations = [%s]" % ",\n".join(animation_entries), ""]
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return out
 
 
 def write_boss_script(project: Path) -> None:
@@ -132,90 +141,109 @@ signal boss_died(boss_name: String)
 
 var health: int = 1
 var _attack_timer: float = 0.0
-var _target: Node2D = null
+var _attack_anim_timer: float = 0.0
+var _target_refresh_timer: float = 0.0
+var _cached_player: Node2D = null
 var _home_position: Vector2
+var _engaged: bool = false
+
+@onready var sprite: AnimatedSprite2D = $AnimatedSprite2D
 
 func _ready() -> void:
     health = max_health
     _home_position = global_position
     add_to_group("boss")
-    add_to_group("enemy")
+    add_to_group("bosses")
+    add_to_group("enemies")
+    _cached_player = get_tree().get_first_node_in_group("player") as Node2D
+    _play_anim("idle")
 
 func _physics_process(delta: float) -> void:
+    if health <= 0:
+        return
     _attack_timer = maxf(0.0, _attack_timer - delta)
-    _refresh_target()
+    _attack_anim_timer = maxf(0.0, _attack_anim_timer - delta)
+    _target_refresh_timer = maxf(0.0, _target_refresh_timer - delta)
 
-    if not is_instance_valid(_target):
+    if _attack_anim_timer > 0.0:
+        velocity = Vector2.ZERO
+        return
+
+    _refresh_target()
+    if not is_instance_valid(_cached_player) or not _engaged:
         _return_home()
         return
 
     if global_position.distance_to(_home_position) > leash_radius:
-        _target = null
+        _engaged = false
         _return_home()
         return
 
-    var offset: Vector2 = _target.global_position - global_position
+    var offset: Vector2 = _cached_player.global_position - global_position
     var dist: float = offset.length()
+    if dist > aggro_radius:
+        _engaged = false
+        _return_home()
+        return
+
     if dist > attack_range:
         velocity = offset.normalized() * move_speed
+        sprite.flip_h = velocity.x < 0.0
         move_and_slide()
+        _play_anim("walk")
     else:
         velocity = Vector2.ZERO
+        _play_anim("idle")
         if _attack_timer <= 0.0:
             _attack_timer = attack_cooldown
             _attack_target()
 
 func _refresh_target() -> void:
-    if is_instance_valid(_target):
-        if global_position.distance_to(_target.global_position) <= aggro_radius:
-            return
-        _target = null
-
-    var players: Array[Node] = get_tree().get_nodes_in_group("player")
-    if not players.is_empty() and players[0] is Node2D:
-        var candidate := players[0] as Node2D
-        if global_position.distance_to(candidate.global_position) <= aggro_radius:
-            _target = candidate
-            return
-
-    var scene := get_tree().current_scene
-    var fallback := _find_player_recursive(scene)
-    if fallback != null and global_position.distance_to(fallback.global_position) <= aggro_radius:
-        _target = fallback
-
-func _find_player_recursive(node: Node) -> Node2D:
-    if node == null:
-        return null
-    if node is Node2D and (node.name == "Player" or node.name == "player"):
-        return node as Node2D
-    for child in node.get_children():
-        var found := _find_player_recursive(child)
-        if found != null:
-            return found
-    return null
+    if is_instance_valid(_cached_player):
+        if global_position.distance_to(_cached_player.global_position) <= aggro_radius:
+            _engaged = true
+        return
+    if _target_refresh_timer > 0.0:
+        return
+    _target_refresh_timer = 0.25
+    _cached_player = get_tree().get_first_node_in_group("player") as Node2D
+    if is_instance_valid(_cached_player):
+        _engaged = global_position.distance_to(_cached_player.global_position) <= aggro_radius
 
 func _return_home() -> void:
     var distance_home := global_position.distance_to(_home_position)
     if distance_home <= 6.0:
         velocity = Vector2.ZERO
+        _play_anim("idle")
         return
     velocity = global_position.direction_to(_home_position) * move_speed
+    sprite.flip_h = velocity.x < 0.0
     move_and_slide()
+    _play_anim("walk")
 
 func _attack_target() -> void:
-    if not is_instance_valid(_target):
+    if not is_instance_valid(_cached_player):
         return
-    if _target.has_method("take_damage"):
-        _target.call("take_damage", attack_damage)
-    elif _target.has_method("apply_damage"):
-        _target.call("apply_damage", attack_damage)
-    elif _target.has_method("damage"):
-        _target.call("damage", attack_damage)
+    _attack_anim_timer = minf(0.62, attack_cooldown * 0.65)
+    _play_anim("attack", true)
+    if _cached_player.has_method("take_damage"):
+        _cached_player.call("take_damage", attack_damage)
+    elif _cached_player.has_method("apply_damage"):
+        _cached_player.call("apply_damage", attack_damage)
+    elif _cached_player.has_method("damage"):
+        _cached_player.call("damage", attack_damage)
+
+func _play_anim(anim_name: String, restart: bool = false) -> void:
+    if not sprite.sprite_frames.has_animation(anim_name):
+        return
+    if restart or sprite.animation != anim_name or not sprite.is_playing():
+        sprite.play(anim_name)
 
 func take_damage(amount: int) -> void:
     if amount <= 0 or health <= 0:
         return
     health = maxi(0, health - amount)
+    _engaged = true
     modulate = Color(1.0, 0.62, 0.62, 1.0)
     var tween := create_tween()
     tween.tween_property(self, "modulate", Color.WHITE, 0.14)
@@ -226,6 +254,7 @@ func apply_damage(amount: int) -> void:
     take_damage(amount)
 
 func _die() -> void:
+    velocity = Vector2.ZERO
     _grant_rewards()
     boss_died.emit(boss_name)
     queue_free()
@@ -243,27 +272,119 @@ func _grant_rewards() -> void:
             gs.call("add_item", "scrap", reward_scrap)
         if reward_item_amount > 0:
             gs.call("add_item", reward_item_id, reward_item_amount)
+
+func get_boss_name() -> String:
+    return boss_name
+
+func get_boss_health_ratio() -> float:
+    if max_health <= 0:
+        return 0.0
+    return clampf(float(health) / float(max_health), 0.0, 1.0)
+
+func get_boss_health_text() -> String:
+    return "%d / %d" % [health, max_health]
+
+func is_boss_active() -> bool:
+    return _engaged and health > 0 and visible
 ''', encoding="utf-8")
 
 
-def make_boss_scene(
-    project: Path,
-    scene_name: str,
-    texture: Path,
-    display_name: str,
-    stats: dict,
-    target_height: float,
-) -> Path:
-    boss_dir = project / "scenes" / "bosses"
-    boss_dir.mkdir(parents=True, exist_ok=True)
-    scene = boss_dir / f"{scene_name}.tscn"
-    texture_res = res_path(project, texture)
-    script_res = "res://scripts/integrated_boss.gd"
-    frame_w, frame_h = frame_rect_for_texture(texture)
-    scale = display_scale(texture, target_height)
-
-    scene.write_text(f'''[gd_scene load_steps=4 format=3]\n\n[ext_resource type="Script" path="{script_res}" id="1_script"]\n[ext_resource type="Texture2D" path="{texture_res}" id="2_texture"]\n\n[sub_resource type="RectangleShape2D" id="RectangleShape2D_boss"]\nsize = Vector2(52, 44)\n\n[node name="{scene_name}" type="CharacterBody2D"]\nscript = ExtResource("1_script")\nboss_name = "{display_name}"\nmax_health = {stats['health']}\nmove_speed = {stats['speed']}\nattack_damage = {stats['damage']}\nattack_range = {stats['range']}\nattack_cooldown = {stats['cooldown']}\naggro_radius = {stats['aggro']}\nleash_radius = {stats['leash']}\nreward_gold = {stats['gold']}\nreward_scrap = {stats['scrap']}\nreward_item_id = "{stats['item']}"\nreward_item_amount = {stats['amount']}\n\n[node name="Sprite2D" type="Sprite2D" parent="."]\ntexture = ExtResource("2_texture")\nregion_enabled = true\nregion_rect = Rect2(0, 0, {frame_w}, {frame_h})\nscale = Vector2({scale:.4f}, {scale:.4f})\n\n[node name="CollisionShape2D" type="CollisionShape2D" parent="."]\nposition = Vector2(0, 12)\nshape = SubResource("RectangleShape2D_boss")\n''', encoding="utf-8")
+def make_minotaur_scene(project: Path, frames: Path) -> Path:
+    scene = project / "scenes" / "bosses" / "MinotaurBoss.tscn"
+    scene.parent.mkdir(parents=True, exist_ok=True)
+    scene.write_text(f'''[gd_scene load_steps=4 format=3]\n\n[ext_resource type="Script" path="res://scripts/integrated_boss.gd" id="1_script"]\n[ext_resource type="SpriteFrames" path="{res_path(project, frames)}" id="2_frames"]\n\n[sub_resource type="RectangleShape2D" id="RectangleShape2D_boss"]\nsize = Vector2(72, 58)\n\n[node name="MinotaurBoss" type="CharacterBody2D"]\nscript = ExtResource("1_script")\nboss_name = "MINOTAURO"\nmax_health = 950\nmove_speed = 58.0\nattack_damage = 34\nattack_range = 58.0\nattack_cooldown = 1.35\naggro_radius = 430.0\nleash_radius = 620.0\nreward_gold = 450\nreward_scrap = 18\nreward_item_id = "boss_crystal"\nreward_item_amount = 2\n\n[node name="AnimatedSprite2D" type="AnimatedSprite2D" parent="."]\nsprite_frames = ExtResource("2_frames")\nanimation = &"idle"\nautoplay = "idle"\nscale = Vector2(0.65, 0.65)\n\n[node name="CollisionShape2D" type="CollisionShape2D" parent="."]\nposition = Vector2(0, 18)\nshape = SubResource("RectangleShape2D_boss")\n''', encoding="utf-8")
     return scene
+
+
+def make_mantis_scene(project: Path) -> Path:
+    # Reuse the existing animated insect system from the base project.
+    scene = project / "scenes" / "bosses" / "MantisBoss.tscn"
+    scene.parent.mkdir(parents=True, exist_ok=True)
+    scene.write_text('''[gd_scene load_steps=2 format=3]\n\n[ext_resource type="PackedScene" path="res://scenes/enemies/insect_enemy.tscn" id="1_insect"]\n\n[node name="MantisBoss" instance=ExtResource("1_insect")]\nenemy_type = "mantis_boss"\nrespawn_delay = 999999.0\n''', encoding="utf-8")
+    return scene
+
+
+def _replace_once(text: str, old: str, new: str, label: str) -> str:
+    if old not in text:
+        raise RuntimeError(f"Performance patch pattern not found: {label}")
+    return text.replace(old, new, 1)
+
+
+def patch_enemy_performance(project: Path) -> None:
+    enemy_path = project / "scripts" / "enemy.gd"
+    insect_path = project / "scripts" / "insect_enemy.gd"
+
+    enemy = enemy_path.read_text(encoding="utf-8")
+    enemy = _replace_once(
+        enemy,
+        '@export var respawn_delay: float = 10.0\n',
+        '@export var respawn_delay: float = 10.0\n@export var sleep_distance: float = 460.0\n',
+        'enemy sleep_distance',
+    )
+    enemy = _replace_once(
+        enemy,
+        'var initial_collision_mask: int\n',
+        'var initial_collision_mask: int\nvar _cached_player: Node2D = null\n',
+        'enemy cached player var',
+    )
+    enemy = _replace_once(
+        enemy,
+        'func _ready() -> void:\n    add_to_group("enemies")\n',
+        'func _ready() -> void:\n    add_to_group("enemies")\n    _cached_player = get_tree().get_first_node_in_group("player") as Node2D\n',
+        'enemy cache ready',
+    )
+    enemy = _replace_once(
+        enemy,
+        '''    var player := get_tree().get_first_node_in_group("player") as Node2D\n    if player == null:\n        return\n    var distance := global_position.distance_to(player.global_position)\n    if distance > detection_range:\n        velocity = velocity.move_toward(Vector2.ZERO, 8.0)\n        move_and_slide()\n        _play_state("idle")\n        return\n''',
+        '''    if not is_instance_valid(_cached_player):\n        _cached_player = get_tree().get_first_node_in_group("player") as Node2D\n    var player := _cached_player\n    if player == null:\n        return\n    var distance := global_position.distance_to(player.global_position)\n    if distance > sleep_distance:\n        velocity = Vector2.ZERO\n        return\n    if distance > detection_range:\n        velocity = Vector2.ZERO\n        _play_state("idle")\n        return\n''',
+        'enemy far processing',
+    )
+    enemy_path.write_text(enemy, encoding="utf-8")
+
+    insect = insect_path.read_text(encoding="utf-8")
+    insect = _replace_once(
+        insect,
+        '@export var respawn_delay: float = 14.0\n',
+        '@export var respawn_delay: float = 14.0\n@export var sleep_distance: float = 480.0\n',
+        'insect sleep_distance',
+    )
+    insect = _replace_once(
+        insect,
+        'var initial_collision_mask: int\n',
+        'var initial_collision_mask: int\nvar _cached_player: Node2D = null\n',
+        'insect cached player var',
+    )
+    insect = _replace_once(
+        insect,
+        'func _ready() -> void:\n    add_to_group("enemies")\n',
+        'func _ready() -> void:\n    add_to_group("enemies")\n    _cached_player = get_tree().get_first_node_in_group("player") as Node2D\n',
+        'insect cache ready',
+    )
+    insect = _replace_once(
+        insect,
+        '''    var player := get_tree().get_first_node_in_group("player") as Node2D\n    if player == null:\n        return\n    var distance := global_position.distance_to(player.global_position)\n''',
+        '''    if not is_instance_valid(_cached_player):\n        _cached_player = get_tree().get_first_node_in_group("player") as Node2D\n    var player := _cached_player\n    if player == null:\n        return\n    var distance := global_position.distance_to(player.global_position)\n    if distance > sleep_distance:\n        velocity = Vector2.ZERO\n        return\n''',
+        'insect far processing',
+    )
+    insect = insect.replace('            scale = Vector2(1.6, 1.6)', '            scale = Vector2(1.25, 1.25)', 1)
+    insect_path.write_text(insect, encoding="utf-8")
+
+    # Boss HUD group lookup does not need to happen every rendered frame.
+    hud_path = project / "scripts" / "hud.gd"
+    hud = hud_path.read_text(encoding="utf-8")
+    hud = _replace_once(
+        hud,
+        'var active_modal: String = ""\n',
+        'var active_modal: String = ""\nvar boss_hud_timer: float = 0.0\n',
+        'hud boss timer',
+    )
+    hud = _replace_once(
+        hud,
+        '    _refresh_boss_hud()\n    if hide_timer > 0.0:\n',
+        '    boss_hud_timer -= delta\n    if boss_hud_timer <= 0.0:\n        boss_hud_timer = 0.12\n        _refresh_boss_hud()\n    if hide_timer > 0.0:\n',
+        'hud boss refresh throttle',
+    )
+    hud_path.write_text(hud, encoding="utf-8")
 
 
 def _region_spawn_position(text: str, fallback: tuple[float, float]) -> tuple[float, float]:
@@ -274,7 +395,6 @@ def _region_spawn_position(text: str, fallback: tuple[float, float]) -> tuple[fl
     points = [(float(x), float(y)) for x, y in matches]
     if len(points) < 4:
         return fallback
-
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
     min_x, max_x = min(xs), max(xs)
@@ -283,8 +403,6 @@ def _region_spawn_position(text: str, fallback: tuple[float, float]) -> tuple[fl
     height = max_y - min_y
     if width < 300 or height < 220:
         return fallback
-
-    # Far lower-right corner inside the region, away from common entrance/NPC cluster.
     return (max_x - min(180.0, width * 0.12), max_y - min(160.0, height * 0.12))
 
 
@@ -298,15 +416,12 @@ def embed_boss_in_region(
     region = project / region_rel
     if not region.exists():
         raise RuntimeError(f"Region scene not found: {region_rel}")
-
     text = region.read_text(encoding="utf-8")
     if f'name="{node_name}"' in text:
         return
-
     ext_id = f"boss_{node_name.lower()}"
     boss_res = res_path(project, boss_scene)
     ext_line = f'[ext_resource type="PackedScene" path="{boss_res}" id="{ext_id}"]'
-
     lines = text.splitlines()
     insert_at = 1
     for i, line in enumerate(lines):
@@ -314,15 +429,12 @@ def embed_boss_in_region(
             insert_at = i + 1
     lines.insert(insert_at, ext_line)
     text = "\n".join(lines) + "\n"
-
     header = re.search(r"\[gd_scene([^\]]*)\]", text)
     if header:
-        attrs = header.group(1)
-        m = re.search(r"load_steps=(\d+)", attrs)
+        m = re.search(r"load_steps=(\d+)", header.group(1))
         if m:
             old = int(m.group(1))
             text = text.replace(f"load_steps={old}", f"load_steps={old + 1}", 1)
-
     x, y = _region_spawn_position(text, fallback)
     text += (
         f'\n[node name="{node_name}" parent="." instance=ExtResource("{ext_id}")]\n'
@@ -335,7 +447,6 @@ def write_icon_library(project: Path, icons_dir: Path) -> None:
     pngs = sorted(icons_dir.rglob("*.png"))
     if not pngs:
         raise RuntimeError("No PNG icons found in 496 RPG icons pack")
-
     preferred_keys = [
         "sword", "shield", "armor", "helmet", "boots", "ring", "amulet",
         "potion_health", "potion_mana", "key", "crystal", "scrap", "coin",
@@ -344,13 +455,11 @@ def write_icon_library(project: Path, icons_dir: Path) -> None:
     mapping: dict[str, str] = {}
     for i, key in enumerate(preferred_keys):
         mapping[key] = res_path(project, pngs[i % len(pngs)])
-
     data_dir = project / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "rpg_icon_catalog.json").write_text(
         json.dumps(mapping, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-
     lib = project / "scripts" / "rpg_icon_library.gd"
     lib.write_text(r'''extends Node
 
@@ -388,15 +497,14 @@ func get_icon(item_id: String) -> Texture2D:
 def write_notes(project: Path) -> None:
     docs = project / "docs"
     docs.mkdir(parents=True, exist_ok=True)
-    (docs / "V1_8_5_BOSSES_ORGANIZADOS.md").write_text(
-        '''# V1.8.5 - Bosses organizados\n\n'''
-        '''- Minotauro integrado em `scenes/world/regions/06_masmorra_antiga.tscn`.\n'''
-        '''- Mantis Ancião integrado em `scenes/world/regions/02_floresta_sussurrante.tscn`.\n'''
-        '''- Não existe mais spawn automático de bosses perto do Player.\n'''
-        '''- Escala visual é calculada pelo tamanho real da textura e limitada.\n'''
-        '''- Sprite sheets exibem apenas o primeiro frame em vez da imagem inteira.\n'''
-        '''- Bosses possuem raio de agressão e limite de perseguição para não invadir outras áreas.\n'''
-        '''- As cenas `MinotaurBoss.tscn` e `MantisBoss.tscn` continuam editáveis manualmente.\n''',
+    (docs / "V1_8_6_PERFORMANCE_ANIMATIONS.md").write_text(
+        '''# V1.8.6 - Performance e animações dos bosses\n\n'''
+        '''- Minotauro agora usa AnimatedSprite2D com idle, walk e attack.\n'''
+        '''- Mantis boss reutiliza o sistema `insect_enemy.tscn` já animado no projeto.\n'''
+        '''- IA de inimigos comuns e insetos passa a armazenar referência do Player em cache.\n'''
+        '''- Inimigos muito distantes entram em caminho leve e deixam de chamar movimento/animação todo frame.\n'''
+        '''- Atualização do HUD de boss foi limitada a aproximadamente 8 vezes por segundo.\n'''
+        '''- Mantis permanece na Floresta Sussurrante e Minotauro na Masmorra Antiga.\n''',
         encoding="utf-8",
     )
 
@@ -413,24 +521,34 @@ def static_validate(project: Path) -> None:
         project / "project.godot",
         project / "scenes" / "bosses" / "MinotaurBoss.tscn",
         project / "scenes" / "bosses" / "MantisBoss.tscn",
+        project / "resources" / "animations" / "minotaur_integrated_frames.tres",
         project / "scripts" / "integrated_boss.gd",
+        project / "scripts" / "enemy.gd",
+        project / "scripts" / "insect_enemy.gd",
         project / "scripts" / "rpg_icon_library.gd",
         project / "data" / "rpg_icon_catalog.json",
-        project / "scenes" / "world" / "regions" / "02_floresta_sussurrante.tscn",
-        project / "scenes" / "world" / "regions" / "06_masmorra_antiga.tscn",
     ]
     missing = [str(p) for p in required if not p.exists()]
     if missing:
         raise RuntimeError("Missing integrated files: " + ", ".join(missing))
 
-    pg = (project / "project.godot").read_text(encoding="utf-8")
-    if "BossContentIntegration" in pg:
-        raise RuntimeError("Old global BossContentIntegration autoload still present")
-
     mino = (project / "scenes" / "bosses" / "MinotaurBoss.tscn").read_text(encoding="utf-8")
     mantis = (project / "scenes" / "bosses" / "MantisBoss.tscn").read_text(encoding="utf-8")
-    if "Vector2(2.0, 2.0)" in mino or "Vector2(2.0, 2.0)" in mantis:
-        raise RuntimeError("Unsafe boss scale 2.0 detected")
+    frames = (project / "resources" / "animations" / "minotaur_integrated_frames.tres").read_text(encoding="utf-8")
+    enemy = (project / "scripts" / "enemy.gd").read_text(encoding="utf-8")
+    insect = (project / "scripts" / "insect_enemy.gd").read_text(encoding="utf-8")
+
+    if 'type="AnimatedSprite2D"' not in mino or 'autoplay = "idle"' not in mino:
+        raise RuntimeError("Minotaur is not using AnimatedSprite2D")
+    for animation_name in ['&"idle"', '&"walk"', '&"attack"']:
+        if animation_name not in frames:
+            raise RuntimeError(f"Missing Minotaur animation: {animation_name}")
+    if 'insect_enemy.tscn' not in mantis or 'enemy_type = "mantis_boss"' not in mantis:
+        raise RuntimeError("Mantis boss is not using the animated insect system")
+    if '_cached_player' not in enemy or 'sleep_distance' not in enemy:
+        raise RuntimeError("Enemy performance patch missing")
+    if '_cached_player' not in insect or 'sleep_distance' not in insect:
+        raise RuntimeError("Insect performance patch missing")
 
     forest = (project / "scenes" / "world" / "regions" / "02_floresta_sussurrante.tscn").read_text(encoding="utf-8")
     dungeon = (project / "scenes" / "world" / "regions" / "06_masmorra_antiga.tscn").read_text(encoding="utf-8")
@@ -476,50 +594,11 @@ def main() -> None:
     copy_tree_contents(mino_unpack, mino_dst)
     copy_tree_contents(insects_unpack, mantis_dst)
 
-    mino_tex = pick_png(mino_dst, ["idle", "walk", "run", "attack", "mino"])
-    mantis_tex = pick_png(mantis_dst, ["mantismove", "mantisattack", "mantis"])
-
+    patch_enemy_performance(project)
     write_boss_script(project)
-    mino_scene = make_boss_scene(
-        project,
-        "MinotaurBoss",
-        mino_tex,
-        "MINOTAURO",
-        {
-            "health": 950,
-            "speed": 58.0,
-            "damage": 34,
-            "range": 58.0,
-            "cooldown": 1.35,
-            "aggro": 430.0,
-            "leash": 620.0,
-            "gold": 450,
-            "scrap": 18,
-            "item": "boss_crystal",
-            "amount": 2,
-        },
-        target_height=104.0,
-    )
-    mantis_scene = make_boss_scene(
-        project,
-        "MantisBoss",
-        mantis_tex,
-        "MANTIS ANCIÃO",
-        {
-            "health": 780,
-            "speed": 70.0,
-            "damage": 28,
-            "range": 52.0,
-            "cooldown": 0.95,
-            "aggro": 390.0,
-            "leash": 560.0,
-            "gold": 380,
-            "scrap": 14,
-            "item": "boss_crystal",
-            "amount": 1,
-        },
-        target_height=78.0,
-    )
+    mino_frames = write_minotaur_spriteframes(project, mino_dst)
+    mino_scene = make_minotaur_scene(project, mino_frames)
+    mantis_scene = make_mantis_scene(project)
 
     embed_boss_in_region(
         project,
@@ -549,8 +628,9 @@ def main() -> None:
             raise RuntimeError(f"Corrupt ZIP entry: {bad}")
 
     print(f"Generated: {out}")
-    print(f"Minotaur texture: {mino_tex.name}, dimensions={png_dimensions(mino_tex)}, scale={display_scale(mino_tex, 104.0):.4f}")
-    print(f"Mantis texture: {mantis_tex.name}, dimensions={png_dimensions(mantis_tex)}, scale={display_scale(mantis_tex, 78.0):.4f}")
+    print("Minotaur animations: idle/walk/attack")
+    print("Mantis animations: existing mantis_frames.tres through insect_enemy.tscn")
+    print("Performance patch: cached player + far-enemy sleep path + throttled boss HUD")
     print(f"Size: {out.stat().st_size} bytes")
 
 

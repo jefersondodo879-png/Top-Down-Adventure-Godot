@@ -6,6 +6,7 @@ on:
     paths:
       - 'input/**'
       - 'tools/integrate_project.py'
+      - 'tests/**'
 
 permissions:
   contents: read
@@ -31,13 +32,29 @@ jobs:
             test -f "$f" || { echo "Missing: $f"; exit 1; }
           done
 
+      - name: Inspect base scene layout
+        run: |
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import PurePosixPath
+          z = zipfile.ZipFile('input/Top_Down_Adventure_V1_8_3.zip')
+          print('=== CANDIDATE SCENES ===')
+          for n in z.namelist():
+              low = n.lower()
+              if n.endswith('.tscn') and any(k in low for k in ['world','map','region','regiao','floresta','forest','ruin','ruina','dungeon','masmorra']):
+                  print(n)
+          PY
+
+      - name: Regression test - boss layout
+        run: python3 tests/test_boss_layout_guard.py
+
       - name: Integrate content
         run: python3 tools/integrate_project.py
 
       - name: Upload updated Godot project
         uses: actions/upload-artifact@v4
         with:
-          name: Top_Down_Adventure_V1_8_4_ICONS_MINOTAUR_MANTIS
-          path: dist/Top_Down_Adventure_V1_8_4_ICONS_MINOTAUR_MANTIS.zip
+          name: Top_Down_Adventure_V1_8_5_BOSSES_ORGANIZADOS
+          path: dist/Top_Down_Adventure_V1_8_5_BOSSES_ORGANIZADOS.zip
           if-no-files-found: error
           retention-days: 30

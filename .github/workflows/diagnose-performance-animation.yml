@@ -1,0 +1,68 @@
+name: Diagnose Performance and Boss Animations
+
+on:
+  push:
+    paths:
+      - '.github/workflows/diagnose-performance-animation.yml'
+      - 'input/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inspect project and packs
+        run: |
+          python3 - <<'PY'
+          import re, struct, zipfile
+          from pathlib import Path
+
+          def png_size(data: bytes):
+              if len(data) >= 24 and data[:8] == b'\x89PNG\r\n\x1a\n':
+                  return struct.unpack('>II', data[16:24])
+              return None
+
+          base = zipfile.ZipFile('input/Top_Down_Adventure_V1_8_3.zip')
+          names = base.namelist()
+          root = next((n[:-13] for n in names if n.endswith('/project.godot')), '')
+          print('PROJECT ROOT:', root)
+
+          print('\n=== REGION NODE / ENEMY COUNTS ===')
+          for n in names:
+              if '/scenes/world/regions/' in n and n.endswith('.tscn'):
+                  text = base.read(n).decode('utf-8', 'replace')
+                  nodes = text.count('[node ')
+                  enemy_refs = len(re.findall(r'enemy|slime|mantis|beetle|maggot|boss', text, re.I))
+                  print(f'{n}: nodes={nodes}, enemy_refs={enemy_refs}')
+
+          print('\n=== WORLD SCENE ===')
+          for n in names:
+              if n.endswith('/scenes/world/world.tscn'):
+                  text = base.read(n).decode('utf-8', 'replace')
+                  print('nodes=', text.count('[node '), 'region refs=', len(re.findall(r'regions/', text)))
+                  print(text[:12000])
+
+          print('\n=== POTENTIAL HOT SCRIPTS ===')
+          for n in names:
+              if n.endswith('.gd'):
+                  text = base.read(n).decode('utf-8', 'replace')
+                  score = sum(text.count(k) for k in ['_process(', '_physics_process(', 'get_nodes_in_group', 'find_child(', 'get_children()', 'queue_redraw'])
+                  if score >= 3:
+                      print(f'--- {n} score={score} ---')
+                      for line in text.splitlines():
+                          if any(k in line for k in ['_process(', '_physics_process(', 'get_nodes_in_group', 'find_child(', 'get_children()', 'queue_redraw']):
+                              print(line[:220])
+
+          for zipname in ['input/mino_v1.1_free(1).zip', 'input/Animated insect enemy assets(1).zip']:
+              print(f'\n=== ANIMATION ASSETS: {zipname} ===')
+              z = zipfile.ZipFile(zipname)
+              for n in z.namelist():
+                  if n.lower().endswith('.png'):
+                      size = png_size(z.read(n))
+                      print(f'{n} size={size}')
+          PY

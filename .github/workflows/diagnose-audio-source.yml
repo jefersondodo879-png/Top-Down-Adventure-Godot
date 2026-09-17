@@ -1,0 +1,45 @@
+name: Diagnose RPG Essentials Audio Source
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/diagnose-audio-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inspect current AudioManager and official itch page
+        shell: bash
+        run: |
+          set -e
+          python3 - <<'PY'
+          import re, zipfile, urllib.request
+
+          z = zipfile.ZipFile('input/Top_Down_Adventure_V1_8_3.zip')
+          print('=== AUDIO FILES IN BASE PROJECT ===')
+          for n in z.namelist():
+              low=n.lower()
+              if any(x in low for x in ['audio_manager.gd', '/audio/', '/sounds/', '/sfx/', '/music/']):
+                  print(n)
+          for n in z.namelist():
+              if n.endswith('/scripts/audio_manager.gd'):
+                  print('\n=== AUDIO MANAGER ===')
+                  print(z.read(n).decode('utf-8','replace'))
+
+          url='https://leohpaz.itch.io/rpg-essentials-sfx-free/purchase'
+          req=urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0'})
+          html=urllib.request.urlopen(req, timeout=30).read().decode('utf-8','replace')
+          print('\n=== ITCH PURCHASE RELEVANT LINES ===')
+          for line in html.splitlines():
+              low=line.lower()
+              if any(k in low for k in ['download', 'upload', 'csrf', 'direct', 'purchase_form', 'file_id', 'game_id']):
+                  print(line[:3000])
+          print('\nHTML bytes:', len(html))
+          PY

@@ -7,6 +7,7 @@ on:
       - 'input/**'
       - 'tools/integrate_project.py'
       - 'tools/integrate_audio_v187.py'
+      - 'tools/integrate_v188.py'
       - 'tests/**'
       - '.github/workflows/build-godot-project.yml'
 
@@ -54,6 +55,9 @@ jobs:
 
       - name: Regression test - RPG Essentials audio
         run: python3 tests/test_v187_audio_integration.py
+
+      - name: Regression test - V1.8.8 integration guard
+        run: python3 tests/test_v188_integration_guard.py
 
       - name: Integrate V1.8.6 performance and boss animations
         run: python3 tools/integrate_project.py

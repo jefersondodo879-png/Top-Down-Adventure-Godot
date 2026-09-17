@@ -20,7 +20,6 @@ jobs:
         run: |
           python3 - <<'PY'
           import re, struct, zipfile
-          from pathlib import Path
 
           def png_size(data: bytes):
               if len(data) >= 24 and data[:8] == b'\x89PNG\r\n\x1a\n':
@@ -37,8 +36,9 @@ jobs:
               if '/scenes/world/regions/' in n and n.endswith('.tscn'):
                   text = base.read(n).decode('utf-8', 'replace')
                   nodes = text.count('[node ')
+                  enemy_nodes = len(re.findall(r'^\[node[^\n]*(Enemy|Slime|Mantis|Beetle|Maggot|Boss)', text, re.I | re.M))
                   enemy_refs = len(re.findall(r'enemy|slime|mantis|beetle|maggot|boss', text, re.I))
-                  print(f'{n}: nodes={nodes}, enemy_refs={enemy_refs}')
+                  print(f'{n}: nodes={nodes}, enemy_nodes={enemy_nodes}, enemy_refs={enemy_refs}')
 
           print('\n=== WORLD SCENE ===')
           for n in names:
@@ -47,7 +47,23 @@ jobs:
                   print('nodes=', text.count('[node '), 'region refs=', len(re.findall(r'regions/', text)))
                   print(text[:12000])
 
-          print('\n=== POTENTIAL HOT SCRIPTS ===')
+          print('\n=== EXISTING BOSS / INSECT FILES ===')
+          for n in names:
+              low = n.lower()
+              if any(k in low for k in ['mantis', 'boss', 'insect', 'enemy']) and (n.endswith('.gd') or n.endswith('.tscn')):
+                  print(n)
+
+          wanted_suffixes = [
+              '/scripts/enemy.gd', '/scripts/insect_enemy.gd', '/scripts/hud.gd',
+              '/scripts/player.gd', '/scripts/mantis_boss.gd', '/scripts/boss.gd'
+          ]
+          print('\n=== RELEVANT SCRIPT CONTENT ===')
+          for n in names:
+              if n.endswith('.gd') and (any(n.endswith(s) for s in wanted_suffixes) or any(k in n.lower() for k in ['enemy', 'mantis', 'boss'])):
+                  text = base.read(n).decode('utf-8', 'replace')
+                  print(f'\n--- {n} ---\n{text[:18000]}')
+
+          print('\n=== HOT LOOPS ===')
           for n in names:
               if n.endswith('.gd'):
                   text = base.read(n).decode('utf-8', 'replace')
@@ -63,6 +79,11 @@ jobs:
               z = zipfile.ZipFile(zipname)
               for n in z.namelist():
                   if n.lower().endswith('.png'):
-                      size = png_size(z.read(n))
-                      print(f'{n} size={size}')
+                      print(f'{n} size={png_size(z.read(n))}')
+                  elif any(k in n.lower() for k in ['readme', 'license', 'credit']):
+                      try:
+                          print(f'--- {n} ---')
+                          print(z.read(n).decode('utf-8', 'replace')[:5000])
+                      except Exception:
+                          pass
           PY

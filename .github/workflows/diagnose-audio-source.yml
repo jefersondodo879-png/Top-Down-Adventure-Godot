@@ -15,28 +15,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Inspect itch direct-download flow
+      - name: Probe official itch download flow
         shell: bash
         run: |
           set -e
           python3 - <<'PY'
-          import re, urllib.request
+          import http.cookiejar, json, re, urllib.parse, urllib.request
 
-          headers={'User-Agent':'Mozilla/5.0'}
-          purchase='https://leohpaz.itch.io/rpg-essentials-sfx-free/purchase'
-          html=urllib.request.urlopen(urllib.request.Request(purchase, headers=headers), timeout=30).read().decode('utf-8','replace')
-          csrf=re.search(r'<meta name="csrf_token" value="([^"]+)"', html)
-          print('csrf found:', bool(csrf))
-          js_urls=re.findall(r'<script[^>]+src="([^"]+)"', html)
-          print('scripts:', js_urls)
-          checkout=[u for u in js_urls if 'checkout' in u]
-          if checkout:
-              url=checkout[0]
-              js=urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30).read().decode('utf-8','replace')
-              print('checkout bytes:', len(js))
-              for token in ['direct_download_btn','download_key','free_download','claim','purchase/download','download_url']:
-                  idx=js.find(token)
-                  print('\nTOKEN', token, 'idx=', idx)
-                  if idx >= 0:
-                      print(js[max(0,idx-1400):idx+2400])
+          base='https://leohpaz.itch.io'
+          slug='/rpg-essentials-sfx-free'
+          ua='Mozilla/5.0'
+          jar=http.cookiejar.CookieJar()
+          opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+          def req(url, data=None, headers=None):
+              h={'User-Agent':ua}
+              if headers: h.update(headers)
+              r=urllib.request.Request(url, data=data, headers=h)
+              return opener.open(r, timeout=60)
+
+          html=req(base+slug+'/purchase').read().decode('utf-8','replace')
+          m=re.search(r'<meta name="csrf_token" value="([^"]+)"', html)
+          assert m, 'csrf not found'
+          csrf=m.group(1)
+          payload=urllib.parse.urlencode({'csrf_token':csrf}).encode()
+          raw=req(base+slug+'/download_url', data=payload, headers={'Referer':base+slug+'/purchase','X-Requested-With':'XMLHttpRequest'}).read().decode('utf-8','replace')
+          print('download_url response:', raw[:2000])
+          obj=json.loads(raw)
+          download_page=obj.get('url','')
+          assert download_page, 'download page URL missing'
+          print('download page:', download_page)
+
+          page=req(download_page, headers={'Referer':base+slug+'/purchase'}).read().decode('utf-8','replace')
+          print('download page bytes:', len(page))
+          print('\n=== DOWNLOAD PAGE RELEVANT LINES ===')
+          for line in page.splitlines():
+              low=line.lower()
+              if 'rpg_essentials_free.zip' in low or 'upload' in low or 'download' in low or 'file' in low:
+                  print(line[:5000])
           PY

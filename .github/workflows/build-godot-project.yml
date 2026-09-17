@@ -51,6 +51,9 @@ jobs:
       - name: Regression test - performance and animation
         run: python3 tests/test_v186_performance_animation.py
 
+      - name: Regression test - RPG Essentials audio
+        run: python3 tests/test_v187_audio_integration.py
+
       - name: Integrate content
         run: python3 tools/integrate_project.py
 

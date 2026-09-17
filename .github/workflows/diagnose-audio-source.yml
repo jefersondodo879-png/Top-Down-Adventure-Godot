@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Probe official itch download flow
+      - name: Inspect upload download endpoint
         shell: bash
         run: |
           set -e
@@ -35,22 +35,37 @@ jobs:
               return opener.open(r, timeout=60)
 
           html=req(base+slug+'/purchase').read().decode('utf-8','replace')
-          m=re.search(r'<meta name="csrf_token" value="([^"]+)"', html)
-          assert m, 'csrf not found'
-          csrf=m.group(1)
-          payload=urllib.parse.urlencode({'csrf_token':csrf}).encode()
-          raw=req(base+slug+'/download_url', data=payload, headers={'Referer':base+slug+'/purchase','X-Requested-With':'XMLHttpRequest'}).read().decode('utf-8','replace')
-          print('download_url response:', raw[:2000])
-          obj=json.loads(raw)
-          download_page=obj.get('url','')
-          assert download_page, 'download page URL missing'
-          print('download page:', download_page)
+          csrf=re.search(r'<meta name="csrf_token" value="([^"]+)"', html).group(1)
+          raw=req(base+slug+'/download_url', data=urllib.parse.urlencode({'csrf_token':csrf}).encode(), headers={'Referer':base+slug+'/purchase','X-Requested-With':'XMLHttpRequest'}).read().decode('utf-8','replace')
+          page_url=json.loads(raw)['url']
+          page=req(page_url, headers={'Referer':base+slug+'/purchase'}).read().decode('utf-8','replace')
+          upload_id=re.search(r'data-upload_id="(\d+)"', page).group(1)
+          page_csrf=re.search(r'<meta name="csrf_token" value="([^"]+)"', page).group(1)
+          print('upload_id:', upload_id)
+          print('page_url:', page_url)
 
-          page=req(download_page, headers={'Referer':base+slug+'/purchase'}).read().decode('utf-8','replace')
-          print('download page bytes:', len(page))
-          print('\n=== DOWNLOAD PAGE RELEVANT LINES ===')
-          for line in page.splitlines():
-              low=line.lower()
-              if 'rpg_essentials_free.zip' in low or 'upload' in low or 'download' in low or 'file' in low:
-                  print(line[:5000])
+          print('\n=== PAGE TOKEN CONTEXT ===')
+          for token in ['download_btn','upload_id','game_download','download_url']:
+              idx=page.find(token)
+              print('TOKEN', token, 'idx=', idx)
+              if idx >= 0:
+                  print(page[max(0,idx-1000):idx+2500])
+
+          scripts=re.findall(r'<script[^>]+src="([^"]+)"', page)
+          for url in scripts:
+              try:
+                  js=req(url).read().decode('utf-8','replace')
+              except Exception as e:
+                  print('script fetch failed', url, e)
+                  continue
+              hits=[]
+              for token in ['download_btn','upload_id','uploadId','game_download','download_url','/file/']:
+                  idx=js.find(token)
+                  if idx >= 0:
+                      hits.append((token,idx))
+              if hits:
+                  print('\n=== SCRIPT', url, '===', hits)
+                  for token,idx in hits:
+                      print('\nTOKEN',token)
+                      print(js[max(0,idx-1200):idx+2600])
           PY

@@ -36,7 +36,6 @@ jobs:
         run: |
           python3 - <<'PY'
           import zipfile
-          from pathlib import PurePosixPath
           z = zipfile.ZipFile('input/Top_Down_Adventure_V1_8_3.zip')
           print('=== CANDIDATE SCENES ===')
           for n in z.namelist():
@@ -47,6 +46,9 @@ jobs:
 
       - name: Regression test - boss layout
         run: python3 tests/test_boss_layout_guard.py
+
+      - name: Regression test - performance and animation
+        run: python3 tests/test_v186_performance_animation.py
 
       - name: Integrate content
         run: python3 tools/integrate_project.py

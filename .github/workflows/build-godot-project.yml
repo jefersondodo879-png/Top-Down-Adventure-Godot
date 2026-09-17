@@ -7,6 +7,7 @@ on:
       - 'input/**'
       - 'tools/integrate_project.py'
       - 'tests/**'
+      - '.github/workflows/build-godot-project.yml'
 
 permissions:
   contents: read
@@ -56,7 +57,7 @@ jobs:
       - name: Upload updated Godot project
         uses: actions/upload-artifact@v4
         with:
-          name: Top_Down_Adventure_V1_8_5_BOSSES_ORGANIZADOS
-          path: dist/Top_Down_Adventure_V1_8_5_BOSSES_ORGANIZADOS.zip
+          name: Top_Down_Adventure_V1_8_6_PERFORMANCE_ANIMATIONS
+          path: dist/Top_Down_Adventure_V1_8_6_PERFORMANCE_ANIMATIONS.zip
           if-no-files-found: error
           retention-days: 30

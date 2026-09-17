@@ -15,12 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Inspect upload download endpoint
+      - name: Download official archive and list contents
         shell: bash
         run: |
           set -e
           python3 - <<'PY'
-          import http.cookiejar, json, re, urllib.parse, urllib.request
+          import http.cookiejar, io, json, re, urllib.parse, urllib.request, zipfile
 
           base='https://leohpaz.itch.io'
           slug='/rpg-essentials-sfx-free'
@@ -32,40 +32,30 @@ jobs:
               h={'User-Agent':ua}
               if headers: h.update(headers)
               r=urllib.request.Request(url, data=data, headers=h)
-              return opener.open(r, timeout=60)
+              return opener.open(r, timeout=120)
 
-          html=req(base+slug+'/purchase').read().decode('utf-8','replace')
+          purchase_url=base+slug+'/purchase'
+          html=req(purchase_url).read().decode('utf-8','replace')
           csrf=re.search(r'<meta name="csrf_token" value="([^"]+)"', html).group(1)
-          raw=req(base+slug+'/download_url', data=urllib.parse.urlencode({'csrf_token':csrf}).encode(), headers={'Referer':base+slug+'/purchase','X-Requested-With':'XMLHttpRequest'}).read().decode('utf-8','replace')
+          raw=req(base+slug+'/download_url', data=urllib.parse.urlencode({'csrf_token':csrf}).encode(), headers={'Referer':purchase_url,'X-Requested-With':'XMLHttpRequest'}).read().decode('utf-8','replace')
           page_url=json.loads(raw)['url']
-          page=req(page_url, headers={'Referer':base+slug+'/purchase'}).read().decode('utf-8','replace')
+          page=req(page_url, headers={'Referer':purchase_url}).read().decode('utf-8','replace')
           upload_id=re.search(r'data-upload_id="(\d+)"', page).group(1)
           page_csrf=re.search(r'<meta name="csrf_token" value="([^"]+)"', page).group(1)
-          print('upload_id:', upload_id)
-          print('page_url:', page_url)
 
-          print('\n=== PAGE TOKEN CONTEXT ===')
-          for token in ['download_btn','upload_id','game_download','download_url']:
-              idx=page.find(token)
-              print('TOKEN', token, 'idx=', idx)
-              if idx >= 0:
-                  print(page[max(0,idx-1000):idx+2500])
+          file_endpoint=f'{base}{slug}/file/{upload_id}?source=game_download'
+          file_raw=req(file_endpoint, data=urllib.parse.urlencode({'csrf_token':page_csrf}).encode(), headers={'Referer':page_url,'X-Requested-With':'XMLHttpRequest'}).read().decode('utf-8','replace')
+          print('file endpoint response:', file_raw[:2000])
+          file_url=json.loads(file_raw).get('url','')
+          assert file_url, 'file url missing'
+          data=req(file_url, headers={'Referer':page_url}).read()
+          print('downloaded bytes:', len(data), 'signature:', data[:4])
+          assert data[:2] == b'PK', 'downloaded payload is not a ZIP'
 
-          scripts=re.findall(r'<script[^>]+src="([^"]+)"', page)
-          for url in scripts:
-              try:
-                  js=req(url).read().decode('utf-8','replace')
-              except Exception as e:
-                  print('script fetch failed', url, e)
-                  continue
-              hits=[]
-              for token in ['download_btn','upload_id','uploadId','game_download','download_url','/file/']:
-                  idx=js.find(token)
-                  if idx >= 0:
-                      hits.append((token,idx))
-              if hits:
-                  print('\n=== SCRIPT', url, '===', hits)
-                  for token,idx in hits:
-                      print('\nTOKEN',token)
-                      print(js[max(0,idx-1200):idx+2600])
+          z=zipfile.ZipFile(io.BytesIO(data))
+          print('archive entries:', len(z.namelist()))
+          for n in z.namelist():
+              print(n)
+          bad=z.testzip()
+          assert bad is None, f'bad zip entry: {bad}'
           PY

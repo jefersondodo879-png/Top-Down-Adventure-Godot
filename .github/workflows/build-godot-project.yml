@@ -6,6 +6,7 @@ on:
     paths:
       - 'input/**'
       - 'tools/integrate_project.py'
+      - 'tools/integrate_audio_v187.py'
       - 'tests/**'
       - '.github/workflows/build-godot-project.yml'
 
@@ -54,13 +55,16 @@ jobs:
       - name: Regression test - RPG Essentials audio
         run: python3 tests/test_v187_audio_integration.py
 
-      - name: Integrate content
+      - name: Integrate V1.8.6 performance and boss animations
         run: python3 tools/integrate_project.py
 
-      - name: Upload updated Godot project
+      - name: Integrate V1.8.7 RPG Essentials audio
+        run: python3 tools/integrate_audio_v187.py
+
+      - name: Upload V1.8.7 Godot project
         uses: actions/upload-artifact@v4
         with:
-          name: Top_Down_Adventure_V1_8_6_PERFORMANCE_ANIMATIONS
-          path: dist/Top_Down_Adventure_V1_8_6_PERFORMANCE_ANIMATIONS.zip
+          name: Top_Down_Adventure_V1_8_7_AUDIO_PERFORMANCE_ANIMATIONS
+          path: dist_artifact/
           if-no-files-found: error
           retention-days: 30
